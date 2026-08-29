@@ -83,7 +83,11 @@ java)
   ;;
 ios)
   echo -e "Removing iOS remote development config...\n"
-  rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/ios-remote.json"
+  config="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/ios-remote.json"
+  if ! rm -f -- "$config"; then
+    echo "Could not remove the iOS remote development config: $config" >&2
+    exit 1
+  fi
   echo "The remote Mac and its simulators were not changed."
   ;;
 dotnet)

@@ -61,6 +61,16 @@ OMARCHY_IOS_TEST_SSH_FAIL=1 run_install "developer@offline-mac.local"
 [[ ! -e $config ]] || fail "failed remote validation does not leave config behind"
 pass "installer only saves a Mac that passes the Xcode and simctl checks"
 
+mkdir -p "$config"
+run_install "developer@mac-studio.local"
+(( install_status != 0 )) || fail "installer fails when the config destination is a directory"
+[[ -d $config ]] || fail "failed config finalization leaves the colliding directory untouched"
+if compgen -G "$(dirname "$config")/.ios-remote.json.*" >/dev/null; then
+  fail "failed config finalization cleans up its temporary file"
+fi
+pass "installer reports config finalization failures and cleans up"
+rm -rf "$config"
+
 mkdir -p "$(dirname "$config")"
 printf '%s\n' '{"host":"developer@mac-studio.local"}' >"$config"
 chmod 600 "$config"
@@ -130,3 +140,11 @@ PATH="$stub_bin:$PATH" HOME="$home" XDG_CONFIG_HOME="$home/.config" \
   fail "removing iOS remote setup succeeds" "$(<"$test_tmp/remove.out")"
 [[ ! -e $config ]] || fail "removing iOS remote setup deletes its config"
 pass "removing iOS remote setup only deletes the local connection config"
+
+mkdir -p "$config"
+remove_status=0
+PATH="$stub_bin:$PATH" HOME="$home" XDG_CONFIG_HOME="$home/.config" \
+  bash "$ROOT/bin/omarchy-remove-dev-env" ios >"$test_tmp/remove.out" 2>&1 || remove_status=$?
+(( remove_status != 0 )) || fail "remover reports a config path it cannot remove"
+[[ -d $config ]] || fail "failed removal leaves the colliding directory untouched"
+pass "remover does not falsely report success when local config removal fails"

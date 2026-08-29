@@ -147,16 +147,30 @@ ios)
 
   config_dir=${XDG_CONFIG_HOME:-$HOME/.config}/omarchy
   config=$config_dir/ios-remote.json
-  mkdir -p "$config_dir"
+  if ! mkdir -p "$config_dir"; then
+    echo "Could not create the iOS remote config directory: $config_dir" >&2
+    exit 1
+  fi
   umask 077
-  temp_config=$(mktemp "$config_dir/.ios-remote.json.XXXXXX")
+  if ! temp_config=$(mktemp "$config_dir/.ios-remote.json.XXXXXX"); then
+    echo "Could not create a temporary iOS remote config." >&2
+    exit 1
+  fi
   if ! jq -n --arg host "$remote" '{host: $host}' >"$temp_config"; then
     rm -f "$temp_config"
     echo "Could not write the iOS remote config." >&2
     exit 1
   fi
-  chmod 600 "$temp_config"
-  mv -f "$temp_config" "$config"
+  if ! chmod 600 "$temp_config"; then
+    rm -f "$temp_config"
+    echo "Could not secure the iOS remote config." >&2
+    exit 1
+  fi
+  if ! mv -fT -- "$temp_config" "$config"; then
+    rm -f "$temp_config"
+    echo "Could not install the iOS remote config at: $config" >&2
+    exit 1
+  fi
 
   echo -e "\nConfigured iOS remote development through $remote."
   echo "Run 'omarchy ios doctor' or 'omarchy ios devices'."
