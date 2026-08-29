@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # omarchy:summary=Control and interact with iOS Simulators on a configured remote Mac
-# omarchy:args=<doctor|devices|boot|shutdown|open|run> [arguments...]
+# omarchy:args=<doctor|open|run> [arguments...]
 # omarchy:examples=omarchy ios open | omarchy ios open 'iPhone 16 Pro' | omarchy ios run | omarchy ios run ./app --device 'iPhone 16 Pro'
 
 set -euo pipefail
@@ -12,7 +12,7 @@ cleanup_pids=()
 cleanup_dirs=()
 
 usage() {
-  echo "Usage: omarchy ios <doctor|devices|boot|shutdown|open|run> [arguments]"
+  echo "Usage: omarchy ios <doctor|open|run> [arguments]"
   echo
   echo "  open [device-or-UDID]                  Interact with the Mac desktop through VNC over SSH"
   echo "  run [project-path] [--device name-or-UDID]  Run a detected local Expo project in Expo Go"
@@ -335,23 +335,6 @@ doctor)
     echo "Local VNC viewer: missing (install TigerVNC with: omarchy-pkg-add tigervnc)"
   fi
   ssh -- "$host" 'set -e; printf "macOS: "; sw_vers -productVersion; xcodebuild -version; printf "simctl: "; xcrun --find simctl; xcrun simctl list devices available; if nc -z 127.0.0.1 5900 >/dev/null 2>&1; then echo "Screen Sharing: reachable on remote loopback"; else echo "Screen Sharing: unavailable; enable it manually in macOS System Settings"; fi'
-  ;;
-devices)
-  remote_command xcrun simctl list devices available
-  ;;
-boot)
-  (( $# == 2 )) || fail "Usage: omarchy ios boot <device-name-or-UDID>"
-  udid=$(select_device "$2")
-  remote_command xcrun simctl boot "$udid"
-  ;;
-shutdown)
-  (( $# == 2 )) || fail "Usage: omarchy ios shutdown <device-name-or-UDID|all>"
-  if [[ $2 == all ]]; then
-    remote_command xcrun simctl shutdown all
-  else
-    udid=$(select_device "$2")
-    remote_command xcrun simctl shutdown "$udid"
-  fi
   ;;
 open)
   (( $# <= 2 )) || fail "Usage: omarchy ios open [device-or-UDID]"

@@ -18,13 +18,6 @@ cat >"$stub_bin/ssh" <<'STUB'
 printf '%s\n' "$#" >"$OMARCHY_IOS_TEST_LOG"
 for arg in "$@"; do printf '%s\n' "$arg" >>"$OMARCHY_IOS_TEST_LOG"; done
 [[ -z ${OMARCHY_IOS_TEST_SSH_FAIL:-} ]] || exit 1
-if [[ ${!#} == *'simctl list devices available -j'* ]]; then
-  if [[ -n ${OMARCHY_IOS_TEST_DEVICES_JSON:-} ]]; then
-    printf '%s\n' "$OMARCHY_IOS_TEST_DEVICES_JSON"
-  else
-    printf '%s\n' '{"devices":{"runtime":[{"name":"iPhone 16 Pro","udid":"UDID-16-PRO","state":"Shutdown","isAvailable":true}]}}'
-  fi
-fi
 STUB
 chmod +x "$stub_bin/ssh"
 
@@ -108,35 +101,9 @@ chmod 600 "$config"
 run_ios() {
   ios_status=0
   : >"$log_file"
-  PATH="$stub_bin:$PATH" HOME="$home" XDG_CONFIG_HOME="$home/.config" \
-    OMARCHY_IOS_TEST_LOG="$log_file" OMARCHY_IOS_TEST_DEVICES_JSON="${OMARCHY_IOS_TEST_DEVICES_JSON:-}" \
+  PATH="$stub_bin:$PATH" HOME="$home" XDG_CONFIG_HOME="$home/.config" OMARCHY_IOS_TEST_LOG="$log_file" \
     bash "$ROOT/bin/omarchy-ios" "$@" >"$test_tmp/ios.out" 2>&1 || ios_status=$?
 }
-
-run_ios devices
-(( ios_status == 0 )) || fail "iOS devices command succeeds" "$(<"$test_tmp/ios.out")"
-mapfile -t ssh_call <"$log_file"
-[[ ${ssh_call[1]} == "--" && ${ssh_call[2]} == "developer@mac-studio.local" && ${ssh_call[3]} == "xcrun simctl list devices available" ]] ||
-  fail "iOS devices lists available simulators on the configured Mac" "$(<"$log_file")"
-pass "iOS devices lists available simulators on the configured Mac"
-
-run_ios boot 'iPhone 16 Pro'
-(( ios_status == 0 )) || fail "iOS boot command resolves a unique device name" "$(<"$test_tmp/ios.out")"
-mapfile -t ssh_call <"$log_file"
-[[ ${ssh_call[3]} == 'xcrun simctl boot UDID-16-PRO' ]] ||
-  fail "iOS boot uses the uniquely resolved Simulator UDID" "$(<"$log_file")"
-pass "iOS boot resolves names to stable Simulator UDIDs"
-
-run_ios boot --help
-(( ios_status != 0 )) || fail "iOS boot rejects device values that could become simctl options"
-[[ ! -s $log_file ]] || fail "simctl option injection never reaches SSH" "$(<"$log_file")"
-pass "iOS boot rejects simctl option injection before invoking SSH"
-
-run_ios shutdown all
-(( ios_status == 0 )) || fail "iOS shutdown command succeeds" "$(<"$test_tmp/ios.out")"
-mapfile -t ssh_call <"$log_file"
-[[ ${ssh_call[3]} == "xcrun simctl shutdown all" ]] || fail "iOS shutdown targets the configured Mac" "$(<"$log_file")"
-pass "iOS shutdown targets a named simulator or all simulators"
 
 run_ios open
 (( ios_status != 0 )) || fail "iOS open requires a local VNC viewer"
@@ -153,13 +120,13 @@ mapfile -t ssh_call <"$log_file"
 pass "iOS doctor makes the remote-only boundary explicit and checks Xcode"
 
 printf '%s\n' '{"host":"-Fmalicious"}' >"$config"
-run_ios devices
+run_ios doctor
 (( ios_status != 0 )) || fail "iOS command rejects an unsafe host loaded from config"
 [[ ! -s $log_file ]] || fail "unsafe config never reaches SSH" "$(<"$log_file")"
 pass "iOS command revalidates persisted hosts before invoking SSH"
 
 printf '%s\n' '{not-json' >"$config"
-run_ios devices
+run_ios doctor
 (( ios_status != 0 )) || fail "iOS command rejects malformed JSON config"
 [[ ! -s $log_file ]] || fail "malformed config never reaches SSH" "$(<"$log_file")"
 pass "iOS command treats config as data and rejects malformed JSON"
