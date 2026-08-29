@@ -320,8 +320,6 @@ run_project() {
     ((.dependencies.expo // .devDependencies.expo // null) | type) == "string"
   ' "$project/package.json" >/dev/null 2>&1; then
     run_expo "$project" "$requested"
-  elif [[ -f $project/pubspec.yaml ]]; then
-    fail "Flutter remote run is not supported yet. This workflow currently supports local Expo projects only."
   else
     fail "Could not detect a supported iOS project in: $project. This workflow currently supports local Expo projects only."
   fi

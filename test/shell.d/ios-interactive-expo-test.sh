@@ -141,13 +141,6 @@ IOS_DEVICES_JSON='not-json' run_ios open
 ! grep -q 'simctl boot' "$log" || fail "malformed device data cannot cause Simulator side effects" "$(<"$log")"
 pass "interactive open treats remote device JSON as untrusted data"
 
-flutter_project="$test_tmp/flutter-project"
-mkdir -p "$flutter_project"
-printf 'dependencies:\n  flutter:\n    sdk: flutter\n' >"$flutter_project/pubspec.yaml"
-run_ios run "$flutter_project"
-(( status != 0 )) && grep -q 'not supported' "$test_tmp/out" || fail "run rejects unsupported Flutter explicitly" "$(<"$test_tmp/out")"
-pass "iOS run rejects Flutter instead of claiming false support"
-
 non_expo="$test_tmp/non-expo"
 mkdir -p "$non_expo"; printf '{}\n' >"$non_expo/package.json"
 run_ios run "$non_expo"
