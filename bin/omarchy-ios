@@ -1,0 +1,82 @@
+#!/bin/bash
+
+# omarchy:summary=Control iOS Simulators on a configured remote Mac
+# omarchy:args=<doctor|devices|boot|shutdown|open> [device]
+# omarchy:examples=omarchy ios doctor | omarchy ios boot 'iPhone 16 Pro' | omarchy ios shutdown all
+
+set -euo pipefail
+
+config=${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/ios-remote.json
+
+usage() {
+  echo "Usage: omarchy ios <doctor|devices|boot|shutdown|open> [device]"
+  echo
+  echo "Xcode and iOS Simulator run on the configured remote Mac, never natively on Linux."
+  echo "The open command requires an active macOS GUI login session."
+}
+
+fail() {
+  echo "$1" >&2
+  exit 1
+}
+
+[[ -f $config ]] || fail "iOS remote development is not configured. Run: omarchy install dev-env ios"
+
+mode=$(stat -c %a "$config")
+[[ $mode == "600" ]] || fail "Refusing iOS remote config with mode $mode. Fix it with: chmod 600 '$config'"
+
+host=$(jq -er 'if type == "object" and (.host | type == "string") then .host else empty end' "$config" 2>/dev/null) ||
+  fail "Invalid iOS remote config: $config"
+
+if [[ ! $host =~ ^([[:alnum:]_][[:alnum:]_.-]*@)?[[:alnum:]][[:alnum:]_.:-]*$ ]]; then
+  fail "Invalid SSH target in iOS remote config. Reconfigure with: omarchy install dev-env ios"
+fi
+
+remote_command() {
+  local command=""
+  local arg quoted
+
+  for arg in "$@"; do
+    printf -v quoted '%q' "$arg"
+    if [[ -z $command ]]; then
+      command=$quoted
+    else
+      command+=" $quoted"
+    fi
+  done
+
+  ssh -- "$host" "$command"
+}
+
+validate_device() {
+  [[ $1 != -* ]] || fail "Device names and UDIDs cannot begin with '-'."
+  [[ $1 != *$'\n'* && $1 != *$'\r'* ]] || fail "Device names and UDIDs cannot contain line breaks."
+}
+
+case ${1:-} in
+doctor)
+  echo "iOS support controls a remote Mac over SSH; Xcode and Simulator do not run natively on Linux."
+  ssh -- "$host" 'set -e; printf "macOS: "; sw_vers -productVersion; xcodebuild -version; printf "simctl: "; xcrun --find simctl; xcrun simctl list devices available'
+  ;;
+devices)
+  remote_command xcrun simctl list devices available
+  ;;
+boot)
+  [[ -n ${2:-} ]] || fail "Usage: omarchy ios boot <device-name-or-UDID>"
+  validate_device "$2"
+  remote_command xcrun simctl boot "$2"
+  ;;
+shutdown)
+  [[ -n ${2:-} ]] || fail "Usage: omarchy ios shutdown <device-name-or-UDID|all>"
+  validate_device "$2"
+  remote_command xcrun simctl shutdown "$2"
+  ;;
+open)
+  echo "Opening Simulator in the remote Mac's active GUI session..."
+  remote_command open -a Simulator
+  ;;
+*)
+  usage >&2
+  exit 1
+  ;;
+esac

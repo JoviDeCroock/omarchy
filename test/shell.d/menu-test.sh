@@ -202,6 +202,16 @@ assert(
   'menu keeps Input as a direct config action'
 )
 assert(
+  defaultById['install.development.ios-remote'].disabled.includes('ios-remote.json')
+    && defaultById['install.development.ios-remote'].action.includes('omarchy-install-dev-env ios'),
+  'menu offers iOS Remote setup under Install > Development and dims it once configured'
+)
+assert(
+  defaultById['remove.development.ios-remote'].when.includes('ios-remote.json')
+    && defaultById['remove.development.ios-remote'].action.includes('omarchy-remove-dev-env ios'),
+  'menu offers iOS Remote removal whenever its local connection config exists'
+)
+assert(
   defaultById['setup.direct-boot'].action.includes('omarchy-setup-direct-boot'),
   'menu places Direct Boot directly under Setup'
 )

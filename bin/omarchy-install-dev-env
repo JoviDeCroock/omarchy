@@ -2,12 +2,12 @@
 
 # omarchy:summary=Install a supported development environment
 # omarchy:name=dev-env
-# omarchy:args=<ruby|node|bun|deno|go|laravel|symfony|php|python|elixir|phoenix|rust|java|zig|ocaml|dotnet|clojure|scala>
-# omarchy:examples=omarchy install dev-env ruby | omarchy install dev-env node
+# omarchy:args=<ruby|node|bun|deno|go|laravel|symfony|php|python|elixir|phoenix|rust|java|ios|zig|ocaml|dotnet|clojure|scala> [remote]
+# omarchy:examples=omarchy install dev-env ruby | omarchy install dev-env ios developer@mac.local
 # omarchy:requires-sudo=true
 
 if [[ -z $1 ]]; then
-  echo "Usage: omarchy-install-dev-env <ruby|node|bun|deno|go|laravel|symfony|php|python|elixir|phoenix|rust|java|zig|ocaml|dotnet|clojure|scala>" >&2
+  echo "Usage: omarchy-install-dev-env <ruby|node|bun|deno|go|laravel|symfony|php|python|elixir|phoenix|rust|java|ios|zig|ocaml|dotnet|clojure|scala> [remote]" >&2
   exit 1
 fi
 
@@ -124,6 +124,43 @@ rust)
 java)
   echo -e "Installing Java...\n"
   mise use --global java@latest
+  ;;
+ios)
+  remote=${2:-}
+  if [[ -z $remote ]]; then
+    echo "iOS Simulator and Xcode cannot run on Linux. This configures a real Mac over SSH."
+    echo "Use an SSH config alias or [user@]host. Authentication stays in SSH; Omarchy never stores credentials."
+    remote=$(gum input --prompt "Remote Mac> " --placeholder "developer@mac.local") || exit 1
+  fi
+
+  if [[ ! $remote =~ ^([[:alnum:]_][[:alnum:]_.-]*@)?[[:alnum:]][[:alnum:]_.:-]*$ ]]; then
+    echo "Invalid SSH target. Use an SSH config alias or [user@]host without options, paths, or whitespace." >&2
+    exit 1
+  fi
+
+  echo "Checking Xcode and iOS Simulator support on $remote..."
+  if ! ssh -- "$remote" 'xcode-select -p >/dev/null && xcrun --find simctl >/dev/null && xcrun simctl list devices available >/dev/null'; then
+    echo "The remote Mac is unreachable or does not have a selected Xcode installation with simctl." >&2
+    echo "Install Xcode on the Mac, run xcode-select there if needed, and verify SSH key or agent access." >&2
+    exit 1
+  fi
+
+  config_dir=${XDG_CONFIG_HOME:-$HOME/.config}/omarchy
+  config=$config_dir/ios-remote.json
+  mkdir -p "$config_dir"
+  umask 077
+  temp_config=$(mktemp "$config_dir/.ios-remote.json.XXXXXX")
+  if ! jq -n --arg host "$remote" '{host: $host}' >"$temp_config"; then
+    rm -f "$temp_config"
+    echo "Could not write the iOS remote config." >&2
+    exit 1
+  fi
+  chmod 600 "$temp_config"
+  mv -f "$temp_config" "$config"
+
+  echo -e "\nConfigured iOS remote development through $remote."
+  echo "Run 'omarchy ios doctor' or 'omarchy ios devices'."
+  echo "Only remote Simulator control is included; project sync, builds, and native Linux Xcode are not."
   ;;
 zig)
   echo -e "Installing Zig...\n"
