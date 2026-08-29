@@ -1,18 +1,24 @@
 #!/bin/bash
 
-# omarchy:summary=Control iOS Simulators on a configured remote Mac
-# omarchy:args=<doctor|devices|boot|shutdown|open> [device]
-# omarchy:examples=omarchy ios doctor | omarchy ios boot 'iPhone 16 Pro' | omarchy ios shutdown all
+# omarchy:summary=Control and interact with iOS Simulators on a configured remote Mac
+# omarchy:args=<doctor|devices|boot|shutdown|open|run> [arguments...]
+# omarchy:examples=omarchy ios open | omarchy ios open 'iPhone 16 Pro' | omarchy ios run | omarchy ios run ./app --device 'iPhone 16 Pro'
 
 set -euo pipefail
 
 config=${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/ios-remote.json
+expo_go_cli=expo-go@0.1.0
+cleanup_pids=()
+cleanup_dirs=()
 
 usage() {
-  echo "Usage: omarchy ios <doctor|devices|boot|shutdown|open> [device]"
+  echo "Usage: omarchy ios <doctor|devices|boot|shutdown|open|run> [arguments]"
+  echo
+  echo "  open [device-or-UDID]                  Interact with the Mac desktop through VNC over SSH"
+  echo "  run [project-path] [--device name-or-UDID]  Run a detected local Expo project in Expo Go"
   echo
   echo "Xcode and iOS Simulator run on the configured remote Mac, never natively on Linux."
-  echo "The open command requires an active macOS GUI login session."
+  echo "Screen Sharing must be enabled manually on the Mac; VNC displays its whole desktop, not only Simulator."
 }
 
 fail() {
@@ -20,22 +26,42 @@ fail() {
   exit 1
 }
 
-[[ -f $config ]] || fail "iOS remote development is not configured. Run: omarchy install dev-env ios"
+fail_with_log() {
+  local message=$1 log_file=$2
+  echo "$message" >&2
+  if [[ -s $log_file ]]; then
+    echo "--- Metro output ---" >&2
+    tail -n 80 "$log_file" >&2
+  fi
+  exit 1
+}
 
+cleanup() {
+  local pid dir
+  for pid in "${cleanup_pids[@]}"; do
+    if kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    fi
+  done
+  for dir in "${cleanup_dirs[@]}"; do
+    rm -rf -- "$dir"
+  done
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+[[ -f $config ]] || fail "iOS remote development is not configured. Run: omarchy install dev-env ios"
 mode=$(stat -c %a "$config")
 [[ $mode == "600" ]] || fail "Refusing iOS remote config with mode $mode. Fix it with: chmod 600 '$config'"
-
 host=$(jq -er 'if type == "object" and (.host | type == "string") then .host else empty end' "$config" 2>/dev/null) ||
   fail "Invalid iOS remote config: $config"
-
 if [[ ! $host =~ ^([[:alnum:]_][[:alnum:]_.-]*@)?[[:alnum:]][[:alnum:]_.:-]*$ ]]; then
   fail "Invalid SSH target in iOS remote config. Reconfigure with: omarchy install dev-env ios"
 fi
 
-remote_command() {
-  local command=""
-  local arg quoted
-
+quote_command() {
+  local command="" arg quoted
   for arg in "$@"; do
     printf -v quoted '%q' "$arg"
     if [[ -z $command ]]; then
@@ -44,36 +70,328 @@ remote_command() {
       command+=" $quoted"
     fi
   done
+  printf '%s' "$command"
+}
 
+remote_command() {
+  local command
+  command=$(quote_command "$@")
   ssh -- "$host" "$command"
 }
 
 validate_device() {
+  [[ -n $1 ]] || fail "Device name or UDID cannot be empty."
   [[ $1 != -* ]] || fail "Device names and UDIDs cannot begin with '-'."
-  [[ $1 != *$'\n'* && $1 != *$'\r'* ]] || fail "Device names and UDIDs cannot contain line breaks."
+  [[ $1 != *$'\n'* && $1 != *$'\r'* && $1 != *$'\t'* ]] || fail "Device names and UDIDs cannot contain control separators."
+}
+
+list_devices_json() {
+  remote_command xcrun simctl list devices available -j
+}
+
+select_device() {
+  local requested=${1:-} raw_devices_json devices_json selection
+  if [[ -n $requested ]]; then
+    validate_device "$requested"
+  fi
+  raw_devices_json=$(list_devices_json) || fail "Could not list available iOS Simulators on the remote Mac."
+  devices_json=$(jq -ce '
+    [.devices[][] | select(.isAvailable != false) | {name, udid, state}]
+    | if all(.[]; ((.name | type) == "string" and (.udid | type) == "string" and (.state | type) == "string"))
+      then . else error("invalid device entry") end
+  ' <<<"$raw_devices_json" 2>/dev/null) || fail "Invalid Simulator device data returned by the remote Mac."
+
+  if [[ -n $requested ]]; then
+    mapfile -t matches < <(jq -r --arg target "$requested" '
+      [.[] | select(.udid == $target or .name == $target) | .udid] | .[]
+    ' <<<"$devices_json") || fail "Invalid Simulator device data returned by the remote Mac."
+    (( ${#matches[@]} == 1 )) || fail "No unique available iOS Simulator matches: $requested"
+    printf '%s\n' "${matches[0]}"
+    return
+  fi
+
+  mapfile -t matches < <(jq -r '[.[] | select(.state == "Booted") | .udid] | .[]' <<<"$devices_json") ||
+    fail "Invalid Simulator device data returned by the remote Mac."
+  if (( ${#matches[@]} == 1 )); then
+    printf '%s\n' "${matches[0]}"
+    return
+  fi
+
+  mapfile -t choices < <(jq -r '.[] | [.name, .udid, .state] | @tsv' <<<"$devices_json") ||
+    fail "Invalid Simulator device data returned by the remote Mac."
+  (( ${#choices[@]} > 0 )) || fail "The remote Mac has no available iOS Simulators."
+  selection=$(omarchy-menu-select "iOS Simulator" "${choices[@]}") || fail "No iOS Simulator was selected."
+  IFS=$'\t' read -r _ selection _ <<<"$selection"
+  [[ $selection =~ ^[[:alnum:]-]+$ ]] || fail "The Simulator selector returned an invalid UDID."
+  printf '%s\n' "$selection"
+}
+
+boot_and_focus() {
+  local udid=$1
+  [[ $udid =~ ^[[:alnum:]-]+$ ]] || fail "Invalid Simulator UDID returned by the remote Mac."
+  remote_command xcrun simctl boot "$udid" >/dev/null 2>&1 || true
+  remote_command xcrun simctl bootstatus "$udid" -b >/dev/null || fail "The selected Simulator did not become ready: $udid"
+  remote_command open -a Simulator --args -CurrentDeviceUDID "$udid" >/dev/null || fail "Could not open Simulator in the Mac's active GUI session."
+}
+
+allocate_local_port() {
+  python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
+}
+
+start_ssh_tunnel() {
+  local direction=$1 forwarding=$2 pid attempt local_port=${3:-}
+  ssh -N -o ExitOnForwardFailure=yes "$direction" "$forwarding" -- "$host" &
+  pid=$!
+  cleanup_pids+=("$pid")
+
+  for attempt in {1..30}; do
+    kill -0 "$pid" 2>/dev/null || fail "SSH tunnel failed to start."
+    if [[ -z $local_port ]] || (exec 9<>"/dev/tcp/127.0.0.1/$local_port") 2>/dev/null; then
+      TUNNEL_PID=$pid
+      return
+    fi
+    sleep 0.1
+  done
+  fail "SSH tunnel did not become ready."
+}
+
+interactive_viewer() {
+  local local_port tunnel_pid viewer_status=0
+  omarchy-cmd-present vncviewer || fail "Interactive iOS access requires vncviewer. Install TigerVNC with: omarchy-pkg-add tigervnc"
+  remote_command nc -z 127.0.0.1 5900 >/dev/null 2>&1 || fail "Screen Sharing is not reachable on the Mac's loopback port 5900. Enable Screen Sharing manually in macOS System Settings. It exposes the full Mac desktop, not only Simulator."
+
+  local_port=$(allocate_local_port)
+  if [[ ! $local_port =~ ^[0-9]+$ ]] || (( local_port < 1024 || local_port > 65535 )); then
+    fail "Could not allocate a safe local VNC port."
+  fi
+  start_ssh_tunnel -L "127.0.0.1:$local_port:127.0.0.1:5900" "$local_port"
+  tunnel_pid=$TUNNEL_PID
+
+  echo "Opening the Mac desktop over a loopback-only SSH tunnel. No VNC password is stored or passed on the command line."
+  echo "Screen Sharing exposes the full remote desktop, not only Simulator."
+  vncviewer "127.0.0.1::$local_port" || viewer_status=$?
+  kill "$tunnel_pid" 2>/dev/null || true
+  wait "$tunnel_pid" 2>/dev/null || true
+  (( viewer_status == 0 )) || return "$viewer_status"
+}
+
+expo_go_cache_path() {
+  local remote_home
+  remote_home=$(remote_command sh -c 'printf %s "$HOME"') || fail "Could not resolve the remote Mac user home."
+  [[ $remote_home == /* && $remote_home != *$'\n'* && $remote_home != *$'\r'* ]] || fail "The remote Mac returned an invalid user home path."
+  printf '%s/Library/Caches/omarchy-ios/expo-go/SDK-%s/Expo-Go.app' "$remote_home" "$1"
+}
+
+expo_go_matches_sdk() {
+  local udid=$1 sdk=$2
+  remote_command sh -c '
+    app=$(xcrun simctl get_app_container "$1" host.exp.Exponent app 2>/dev/null) || exit 1
+    constants=$app/EXBuildConstants.plist
+    version=$(plutil -extract TEMPORARY_SDK_VERSION raw -o - "$constants" 2>/dev/null) || version=""
+    if [ "${version%%.*}" = "$2" ]; then exit 0; fi
+    plist=$app/Info.plist
+    version=$(plutil -extract EXUpdatesSDKVersion raw -o - "$plist" 2>/dev/null || plutil -extract EXSDKVersion raw -o - "$plist" 2>/dev/null) || version=""
+    if [ "${version%%.*}" = "$2" ]; then exit 0; fi
+    versions=$(plutil -extract EXSDKVersions json -o - "$plist" 2>/dev/null) || exit 1
+    printf "%s" "$versions" | grep -Eq "\\\"$2(\\.[0-9]+)+\\\""
+  ' _ "$udid" "$sdk"
+}
+
+ensure_expo_go() {
+  local udid=$1 sdk=$2 cache app temp_dir
+  if expo_go_matches_sdk "$udid" "$sdk" >/dev/null 2>&1; then
+    return
+  fi
+
+  cache=$(expo_go_cache_path "$sdk")
+  if remote_command test -d "$cache" >/dev/null 2>&1; then
+    remote_command xcrun simctl install "$udid" "$cache" || fail "Could not install cached Expo Go on the selected Simulator."
+    return
+  fi
+
+  temp_dir=$(mktemp -d)
+  cleanup_dirs+=("$temp_dir")
+  echo "Expo Go for SDK $sdk is not installed; downloading it locally without running project scripts..."
+  (cd "$temp_dir" && pnpm dlx "$expo_go_cli" download ios "$sdk") || fail "Could not download Expo Go for SDK $sdk."
+  shopt -s nullglob
+  apps=("$temp_dir"/Expo-Go-*.tar.app)
+  shopt -u nullglob
+  (( ${#apps[@]} == 1 )) && [[ -d ${apps[0]} ]] || fail "Expected exactly one Expo-Go-*.tar.app directory from expo-go download."
+  app=${apps[0]}
+
+  tar -C "$app" -cf - . | remote_command sh -c '
+    set -eu
+    cache=$1
+    parent=${cache%/*}
+    lock=$parent/.Expo-Go.lock
+    mkdir -p "$parent"
+    attempt=0
+    until mkdir "$lock" 2>/dev/null; do
+      if [ -d "$cache" ]; then
+        tar -tf - >/dev/null
+        exit 0
+      fi
+      attempt=$((attempt + 1))
+      [ "$attempt" -lt 100 ] || exit 18
+      sleep 0.1
+    done
+    tmp=""
+    cleanup() {
+      [ -z "$tmp" ] || rm -rf -- "$tmp"
+      rmdir "$lock" 2>/dev/null || true
+    }
+    trap cleanup EXIT HUP INT TERM
+    if [ -d "$cache" ]; then
+      tar -tf - >/dev/null
+      exit 0
+    fi
+    [ ! -e "$cache" ] || exit 17
+    tmp=$(mktemp -d "$parent/.Expo-Go.app.XXXXXX")
+    tar -xf - -C "$tmp"
+    mv "$tmp" "$cache"
+    tmp=""
+    rmdir "$lock"
+    trap - EXIT HUP INT TERM
+  ' _ "$cache" || fail "Could not atomically transfer Expo Go to the remote Mac cache."
+  remote_command xcrun simctl install "$udid" "$cache" || fail "Could not install Expo Go on the selected Simulator."
+}
+
+run_expo() {
+  local project_arg=${1:-.} requested=${2:-} project expo_version sdk udid temp_dir metro_pid reverse_pid attempt
+  [[ $project_arg != *$'\n'* && $project_arg != *$'\r'* ]] || fail "Project paths cannot contain line breaks."
+  [[ -d $project_arg ]] || fail "Expo project path is not a directory: $project_arg"
+  project=$(realpath -e -- "$project_arg") || fail "Could not resolve Expo project path: $project_arg"
+  [[ -f $project/package.json ]] || fail "Expo project is missing package.json: $project"
+  [[ -f $project/node_modules/expo/package.json ]] || fail "Expo is not installed in this project. Run pnpm install first."
+  omarchy-cmd-present pnpm || fail "Expo remote run requires pnpm."
+  expo_version=$(jq -er '.version | select(type == "string")' "$project/node_modules/expo/package.json" 2>/dev/null) || fail "Installed Expo package has no valid version."
+  [[ $expo_version =~ ^([0-9]+)\. ]] || fail "Installed Expo package has an unsupported version: $expo_version"
+  sdk=${BASH_REMATCH[1]}
+
+  if ss -H -ltn 'sport = :8081' | grep -q .; then
+    fail "Local port 8081 is already occupied; stop the existing service before running Expo."
+  fi
+
+  udid=$(select_device "$requested")
+  boot_and_focus "$udid"
+  ensure_expo_go "$udid" "$sdk"
+
+  temp_dir=$(mktemp -d)
+  cleanup_dirs+=("$temp_dir")
+  echo "Project tooling and dependency installation execute locally from: $project"
+  echo "The source tree and signing state stay local, but Metro sends the generated JavaScript bundle and assets to Expo Go for execution in the remote Simulator."
+  (cd "$project" && pnpm exec expo start --host localhost --port 8081) >"$temp_dir/metro.log" 2>&1 &
+  metro_pid=$!
+  cleanup_pids+=("$metro_pid")
+  start_ssh_tunnel -R "127.0.0.1:8081:127.0.0.1:8081"
+  reverse_pid=$TUNNEL_PID
+
+  for attempt in {1..120}; do
+    kill -0 "$metro_pid" 2>/dev/null || fail_with_log "Metro exited before becoming ready." "$temp_dir/metro.log"
+    if curl -fsS http://127.0.0.1:8081/status 2>/dev/null | grep -q 'packager-status:running'; then
+      break
+    fi
+    (( attempt < 120 )) || fail_with_log "Metro did not become ready on port 8081 within 60 seconds." "$temp_dir/metro.log"
+    sleep 0.5
+  done
+
+  for attempt in {1..30}; do
+    kill -0 "$reverse_pid" 2>/dev/null || fail "The Expo SSH reverse tunnel exited unexpectedly."
+    if remote_command nc -z 127.0.0.1 8081 >/dev/null 2>&1; then
+      break
+    fi
+    (( attempt < 30 )) || fail "Metro is not reachable through the remote loopback SSH tunnel."
+    sleep 0.2
+  done
+
+  remote_command xcrun simctl openurl "$udid" exp://127.0.0.1:8081 || fail "Could not open the local Expo URL in Expo Go."
+  interactive_viewer
+  kill "$reverse_pid" "$metro_pid" 2>/dev/null || true
+  wait "$reverse_pid" "$metro_pid" 2>/dev/null || true
+}
+
+run_project() {
+  local project_arg=$1 requested=$2 project
+  [[ $project_arg != *$'\n'* && $project_arg != *$'\r'* ]] || fail "Project paths cannot contain line breaks."
+  [[ -d $project_arg ]] || fail "Project path is not a directory: $project_arg"
+  project=$(realpath -e -- "$project_arg") || fail "Could not resolve project path: $project_arg"
+
+  if [[ -f $project/package.json ]] && jq -e '
+    ((.dependencies.expo // .devDependencies.expo // null) | type) == "string"
+  ' "$project/package.json" >/dev/null 2>&1; then
+    run_expo "$project" "$requested"
+  elif [[ -f $project/pubspec.yaml ]]; then
+    fail "Flutter remote run is not supported yet. This workflow currently supports local Expo projects only."
+  else
+    fail "Could not detect a supported iOS project in: $project. This workflow currently supports local Expo projects only."
+  fi
 }
 
 case ${1:-} in
 doctor)
   echo "iOS support controls a remote Mac over SSH; Xcode and Simulator do not run natively on Linux."
-  ssh -- "$host" 'set -e; printf "macOS: "; sw_vers -productVersion; xcodebuild -version; printf "simctl: "; xcrun --find simctl; xcrun simctl list devices available'
+  echo "Interactive access uses macOS Screen Sharing and exposes the full remote desktop."
+  if omarchy-cmd-present vncviewer; then
+    echo "Local VNC viewer: $(type -P vncviewer)"
+  else
+    echo "Local VNC viewer: missing (install TigerVNC with: omarchy-pkg-add tigervnc)"
+  fi
+  ssh -- "$host" 'set -e; printf "macOS: "; sw_vers -productVersion; xcodebuild -version; printf "simctl: "; xcrun --find simctl; xcrun simctl list devices available; if nc -z 127.0.0.1 5900 >/dev/null 2>&1; then echo "Screen Sharing: reachable on remote loopback"; else echo "Screen Sharing: unavailable; enable it manually in macOS System Settings"; fi'
   ;;
 devices)
   remote_command xcrun simctl list devices available
   ;;
 boot)
-  [[ -n ${2:-} ]] || fail "Usage: omarchy ios boot <device-name-or-UDID>"
-  validate_device "$2"
-  remote_command xcrun simctl boot "$2"
+  (( $# == 2 )) || fail "Usage: omarchy ios boot <device-name-or-UDID>"
+  udid=$(select_device "$2")
+  remote_command xcrun simctl boot "$udid"
   ;;
 shutdown)
-  [[ -n ${2:-} ]] || fail "Usage: omarchy ios shutdown <device-name-or-UDID|all>"
-  validate_device "$2"
-  remote_command xcrun simctl shutdown "$2"
+  (( $# == 2 )) || fail "Usage: omarchy ios shutdown <device-name-or-UDID|all>"
+  if [[ $2 == all ]]; then
+    remote_command xcrun simctl shutdown all
+  else
+    udid=$(select_device "$2")
+    remote_command xcrun simctl shutdown "$udid"
+  fi
   ;;
 open)
-  echo "Opening Simulator in the remote Mac's active GUI session..."
-  remote_command open -a Simulator
+  (( $# <= 2 )) || fail "Usage: omarchy ios open [device-or-UDID]"
+  omarchy-cmd-present vncviewer || fail "Interactive iOS access requires vncviewer. Install TigerVNC with: omarchy-pkg-add tigervnc"
+  udid=$(select_device "${2:-}")
+  boot_and_focus "$udid"
+  interactive_viewer
+  ;;
+run)
+  shift
+  project=.
+  requested=""
+  project_set=false
+  while (( $# > 0 )); do
+    case $1 in
+    --device)
+      (( $# >= 2 )) || fail "Usage: omarchy ios run [project-path] [--device name-or-UDID]"
+      [[ -z $requested ]] || fail "The Simulator device may be specified only once."
+      requested=$2
+      shift 2
+      ;;
+    --)
+      shift
+      (( $# == 1 )) && [[ $project_set == false ]] || fail "Usage: omarchy ios run [project-path] [--device name-or-UDID]"
+      project=$1
+      project_set=true
+      shift
+      ;;
+    -*) fail "Unknown iOS run option: $1" ;;
+    *)
+      [[ $project_set == false ]] || fail "Usage: omarchy ios run [project-path] [--device name-or-UDID]"
+      project=$1
+      project_set=true
+      shift
+      ;;
+    esac
+  done
+  run_project "$project" "$requested"
   ;;
 *)
   usage >&2

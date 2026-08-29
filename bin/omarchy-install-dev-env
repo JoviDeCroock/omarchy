@@ -145,6 +145,12 @@ ios)
     exit 1
   fi
 
+  echo "Installing TigerVNC for interactive access to the Mac desktop..."
+  if ! omarchy-pkg-add tigervnc; then
+    echo "Could not install TigerVNC; iOS remote development was not configured." >&2
+    exit 1
+  fi
+
   config_dir=${XDG_CONFIG_HOME:-$HOME/.config}/omarchy
   config=$config_dir/ios-remote.json
   if ! mkdir -p "$config_dir"; then
@@ -173,8 +179,9 @@ ios)
   fi
 
   echo -e "\nConfigured iOS remote development through $remote."
-  echo "Run 'omarchy ios doctor' or 'omarchy ios devices'."
-  echo "Only remote Simulator control is included; project sync, builds, and native Linux Xcode are not."
+  echo "Enable Screen Sharing manually on the Mac, then run 'omarchy ios open' for interactive access to its full desktop over VNC-over-SSH."
+  echo "Run a detected local Expo project in Expo Go with: omarchy ios run [project-path] [--device name-or-UDID]"
+  echo "Xcode and Simulator stay on the Mac. Expo tooling runs locally; Metro sends the generated JavaScript bundle and assets to Expo Go on the remote Simulator."
   ;;
 zig)
   echo -e "Installing Zig...\n"

@@ -88,7 +88,7 @@ ios)
     echo "Could not remove the iOS remote development config: $config" >&2
     exit 1
   fi
-  echo "The remote Mac and its simulators were not changed."
+  echo "Only the local connection config was removed. Remote Mac caches, simulators, devices, and app data were not changed."
   ;;
 dotnet)
   echo -e "Removing .NET...\n"
